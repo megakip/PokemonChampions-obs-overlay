@@ -5,6 +5,7 @@ from PIL import Image
 import obsws_python as obs
 import easyocr
 import os
+import threading
 from dotenv import load_dotenv
 
 from config import (
@@ -58,6 +59,9 @@ def refresh_obs_image(source_name, filepath):
     client.set_input_settings(name=source_name, settings={"file": abs_path}, overlay=True)
 
 
+task_lock = threading.Lock()
+
+
 def capture():
     ret, frame = cap.read()
     if not ret:
@@ -82,8 +86,23 @@ def clear():
     print("クリア完了")
 
 
-keyboard.add_hotkey(HOTKEY_CAPTURE, capture)
-keyboard.add_hotkey(HOTKEY_CLEAR, clear)
+def run_async(func):
+    def wrapper():
+        if not task_lock.acquire(blocking=False):
+            print("処理中です。しばらく待ってから再度お試しください。")
+            return
+        try:
+            func()
+        except Exception as e:
+            print(f"エラー: {e}")
+        finally:
+            task_lock.release()
+
+    threading.Thread(target=wrapper, daemon=True).start()
+
+
+keyboard.add_hotkey(HOTKEY_CAPTURE, lambda: run_async(capture))
+keyboard.add_hotkey(HOTKEY_CLEAR, lambda: run_async(clear))
 
 print(f"起動完了 | {HOTKEY_CAPTURE}: キャプチャ | {HOTKEY_CLEAR}: クリア | Esc: 終了")
 keyboard.wait("esc")
