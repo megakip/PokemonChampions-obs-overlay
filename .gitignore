@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 handover.md
 test.png
+.venv/
+calibration_frame.png
+output_*.png

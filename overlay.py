@@ -1,100 +1,100 @@
-import cv2
-import keyboard
-import numpy as np
-from PIL import Image
-import obsws_python as obs
-import easyocr
 import os
+import sys
 import threading
-from dotenv import load_dotenv
 
+# The EasyOCR download progress bar uses characters the default Windows
+# console encoding cannot print. Make stdout UTF-8 before easyocr is imported.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+import cv2
+import easyocr
+import keyboard
+
+from capture_logic import blank_image, compose_pokemon, crop, ocr_name, scale_region
 from config import (
-    DEVICE_ID, NAME_REGION, POKEMON_REGIONS,
-    OUTPUT_POKEMON,
-    OBS_NAME_SOURCE, OBS_POKEMON_SOURCE,
-    HOTKEY_CAPTURE, HOTKEY_CLEAR,
-    OCR_LANGUAGES,
+    CALIBRATION_FRAME, HOTKEY_CALIBRATE, HOTKEY_CAPTURE, HOTKEY_CLEAR, HOTKEY_QUIT,
+    NAME_REGION, OBS_CAPTURE_SOURCE, OCR_LANGUAGES, OCR_UPSCALE, OUTPUT_POKEMON,
+    POKEMON_REGIONS, REFERENCE_SIZE,
 )
+from obs_link import connect, ensure_sources, grab_frame, list_sources, refresh_image, set_text
 
-load_dotenv()
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-client = obs.ReqClient(host="localhost", port=4455, password=os.getenv("OBS_PASSWORD"))
+client = connect()
+print(f"Connected to OBS {client.get_version().obs_version}")
 
-cap = cv2.VideoCapture(DEVICE_ID, cv2.CAP_DSHOW)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+scene, created = ensure_sources(client)
+for name in created:
+    print(f"Created OBS source '{name}' in scene '{scene}'")
 
-print("OCRモデルを読み込み中...")
+inputs, scenes = list_sources(client)
+if OBS_CAPTURE_SOURCE not in inputs and OBS_CAPTURE_SOURCE not in scenes:
+    print(f"WARNING: OBS has no source called '{OBS_CAPTURE_SOURCE}'. "
+          f"Set OBS_CAPTURE_SOURCE in config.py to one of: {inputs + scenes}")
+
+print("Loading OCR model...")
 reader = easyocr.Reader(OCR_LANGUAGES, gpu=False)
-print("OCRモデル読み込み完了")
+print("OCR model ready")
 
 
-def crop(frame, region):
-    x1, y1, x2, y2 = region
-    return frame[y1:y2, x1:x2]
+def get_frame():
+    try:
+        return grab_frame(client, OBS_CAPTURE_SOURCE)
+    except Exception as e:  # noqa: BLE001
+        print(f"Could not grab a picture from OBS source '{OBS_CAPTURE_SOURCE}': {e}")
+        return None
 
 
-def ocr_name(img_bgr):
-    results = reader.readtext(img_bgr)
-    return ' '.join([r[1] for r in results]) if results else ''
+def regions_for(frame):
+    size = (frame.shape[1], frame.shape[0])
+    name = scale_region(NAME_REGION, size, REFERENCE_SIZE)
+    slots = [scale_region(r, size, REFERENCE_SIZE) for r in POKEMON_REGIONS]
+    return name, slots
 
 
-def process_pokemon(frame):
-    slots = [crop(frame, r) for r in POKEMON_REGIONS]
-    margin = 20
-    h = max(s.shape[0] for s in slots)
-    w_total = sum(s.shape[1] for s in slots) + margin * (len(slots) - 1)
-    combined = np.zeros((h, w_total, 4), dtype=np.uint8)
-    x = 0
-    for s in slots:
-        rgb = cv2.cvtColor(s, cv2.COLOR_BGR2RGB)
-        combined[:s.shape[0], x:x + s.shape[1], :3] = rgb
-        combined[:s.shape[0], x:x + s.shape[1], 3] = 255
-        x += s.shape[1] + margin
-    return Image.fromarray(combined, "RGBA")
+def capture():
+    frame = get_frame()
+    if frame is None:
+        return
+    name_region, slot_regions = regions_for(frame)
+
+    name_text = ocr_name(reader, crop(frame, name_region), OCR_UPSCALE)
+    set_text(client, name_text)
+    print(f"Name: {name_text!r}")
+
+    compose_pokemon([crop(frame, r) for r in slot_regions]).save(OUTPUT_POKEMON)
+    refresh_image(client, OUTPUT_POKEMON)
+    print("Capture done")
 
 
-def refresh_obs_image(source_name, filepath):
-    abs_path = os.path.abspath(filepath)
-    client.set_input_settings(name=source_name, settings={"file": abs_path}, overlay=True)
+def clear():
+    set_text(client, "")
+    blank_image().save(OUTPUT_POKEMON)
+    refresh_image(client, OUTPUT_POKEMON)
+    print("Overlay cleared")
+
+
+def calibrate():
+    frame = get_frame()
+    if frame is None:
+        return
+    cv2.imwrite(CALIBRATION_FRAME, frame)
+    print(f"Saved {CALIBRATION_FRAME} ({frame.shape[1]}x{frame.shape[0]}). "
+          f"Run coord_picker.py to check or pick the regions.")
 
 
 task_lock = threading.Lock()
 
 
-def capture():
-    ret, frame = cap.read()
-    if not ret:
-        print("キャプチャ失敗")
-        return
-
-    name_text = ocr_name(crop(frame, NAME_REGION))
-    client.set_input_settings(name=OBS_NAME_SOURCE, settings={"text": name_text}, overlay=True)
-    print(f"名前: {name_text}")
-
-    process_pokemon(frame).save(OUTPUT_POKEMON)
-    refresh_obs_image(OBS_POKEMON_SOURCE, OUTPUT_POKEMON)
-
-    print("キャプチャ完了")
-
-
-def clear():
-    client.set_input_settings(name=OBS_NAME_SOURCE, settings={"text": ""}, overlay=True)
-    blank = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
-    blank.save(OUTPUT_POKEMON)
-    refresh_obs_image(OBS_POKEMON_SOURCE, OUTPUT_POKEMON)
-    print("クリア完了")
-
-
 def run_async(func):
     def wrapper():
         if not task_lock.acquire(blocking=False):
-            print("処理中です。しばらく待ってから再度お試しください。")
+            print("Still busy, try again in a moment.")
             return
         try:
             func()
-        except Exception as e:
-            print(f"エラー: {e}")
+        except Exception as e:  # noqa: BLE001
+            print(f"Error: {e}")
         finally:
             task_lock.release()
 
@@ -103,9 +103,10 @@ def run_async(func):
 
 keyboard.add_hotkey(HOTKEY_CAPTURE, lambda: run_async(capture))
 keyboard.add_hotkey(HOTKEY_CLEAR, lambda: run_async(clear))
+keyboard.add_hotkey(HOTKEY_CALIBRATE, lambda: run_async(calibrate))
 
-print(f"起動完了 | {HOTKEY_CAPTURE}: キャプチャ | {HOTKEY_CLEAR}: クリア | Esc: 終了")
-keyboard.wait("esc")
+print(f"Ready | {HOTKEY_CAPTURE}: capture | {HOTKEY_CLEAR}: clear | "
+      f"{HOTKEY_CALIBRATE}: save calibration picture | {HOTKEY_QUIT}: quit")
+keyboard.wait(HOTKEY_QUIT)
 
-cap.release()
 client.disconnect()

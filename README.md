@@ -1,157 +1,141 @@
 # Pokemon Champions OBS Overlay
 
-An OBS overlay tool for live streaming "Pokemon Champions".  
-Press a hotkey on the team selection screen to instantly display the opponent's player name and 6 Pokemon in OBS.
+An OBS overlay tool for live streaming "Pokemon Champions".
+Press a hotkey on the team selection screen to instantly show the opponent's player name and 6 Pokemon in OBS.
 
-[日本語版はこちら](README_ja.md)
+This is a fork of [Ruprous/PokemonChampions-obs-overlay](https://github.com/Ruprous/PokemonChampions-obs-overlay).
+The original reads the picture from a capture card. **This fork takes the picture straight from an OBS source**,
+so it also works when the game reaches OBS in another way: AirPlay / phone screen mirroring, a window capture,
+a capture card that is already in use by OBS, and so on. No second video device is needed.
 
 ## Features
 
-- Captures the opponent's player name via OCR and displays it as text in OBS
-- Captures each of the opponent's 6 Pokemon slots, arranges them horizontally, and sends to OBS
-- Single hotkey to capture or clear the overlay
+- Reads the opponent's player name with OCR and shows it as a text source in OBS
+- Cuts out the opponent's 6 Pokemon slots, puts them side by side, and shows them as an image source in OBS
+- One hotkey to capture, one to clear
+- Creates the two OBS sources for you on the first run
+- Region coordinates scale automatically to the size of your picture, with a picker tool to fine-tune them
 
 ## Requirements
 
 - Windows
-- OBS Studio 30.0.0+ (WebSocket enabled)
+- OBS Studio 30.0.0+ with the WebSocket server enabled (built in since OBS 28)
 - Python 3.12+
-- Capture card
+- The game visible in an OBS source (AirPlay receiver, capture card, window capture, ...)
 
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/megakip/PokemonChampions-obs-overlay.git
+cd PokemonChampions-obs-overlay
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
 ```
+
+(With [uv](https://docs.astral.sh/uv/): `uv venv .venv --python 3.12` and `uv pip install --python .venv\Scripts\python.exe -r requirements.txt`.)
 
 ### Dependencies
 
 | Package | Purpose |
 |---|---|
-| `obsws-python` | OBS WebSocket communication |
-| `opencv-python` | Capture card video input and image processing |
+| `obsws-python` | OBS WebSocket communication (grab the picture, update the sources) |
+| `opencv-python` | Image processing and the coordinate picker window |
 | `numpy` | Image array manipulation |
 | `Pillow` | PNG image creation with transparency |
 | `keyboard` | Global hotkey detection |
-| `python-dotenv` | Load OBS password from `.env` file |
-| `easyocr` | OCR for opponent trainer name (supports JP/EN/ZH/KO) |
+| `python-dotenv` | Load the OBS password from `.env` |
+| `easyocr` | OCR for the opponent name (JP/EN/ZH/KO) |
 
 ## Setup
 
-### 1. OBS Configuration
+### 1. OBS WebSocket
 
-- Enable the WebSocket server: Tools → WebSocket Server Settings (port: 4455)
-- Create the following sources in OBS:
-  - `pokecham_auto-name` — **Text (GDI+)** source, for the opponent's player name
-  - `pokecham_auto-poke` — **Image** source, for the opponent's Pokemon lineup
+In OBS: **Tools → WebSocket Server Settings**, tick **Enable WebSocket server**, click **OK**.
+Keep the port at 4455. Click **Show Connect Info** to see the password.
 
-### 2. Find Your Capture Card Device ID
-
-Run the following to list available camera devices:
-
-```bash
-python find_camera.py
-```
-
-Note the device number that shows your game footage and set `DEVICE_ID` in `config.py`.
-
-To verify the correct device is showing the right image:
-
-```bash
-python check_camera.py
-```
-
-### 3. Environment Variables
-
-Copy `.env.example` to `.env` and enter your OBS WebSocket password:
+Copy `.env.example` to `.env` and put that password in it:
 
 ```
 OBS_PASSWORD=your_password_here
 ```
 
-Test the connection with:
+Test it:
 
 ```bash
-python test_connection.py
+.venv\Scripts\python test_connection.py
 ```
 
-### 4. Coordinate Configuration
+### 2. Pick the source that shows the game
 
-> **Note:** If your capture card outputs at 1080p, the default coordinates should work as-is. Changing them unnecessarily may cause misalignment and is not recommended.
+Open `config.py` and set `OBS_CAPTURE_SOURCE` to the exact name of the OBS source that shows the game
+(for example `AirPlay Receiver` or `Capture card`). A scene name also works.
 
-Open `config.py` and adjust the coordinates only if your capture resolution differs from 1080p.
+### 3. First run
 
-```python
-DEVICE_ID = 5               # Your capture card device ID
+Double-click `start_overlay.bat`. On the first run it:
 
-NAME_REGION = (1563, 95, 1845, 141)   # Opponent name area (x1, y1, x2, y2)
-POKEMON_REGIONS = [                    # 6 Pokemon slots
-    (1603, 156, 1844, 264),
-    ...
-]
-```
+- creates the sources `pokecham_auto-name` (Text GDI+) and `pokecham_auto-poke` (Image) in the current scene,
+  name at the top-left and Pokemon at the top-right. Move and resize them in OBS however you like.
+- downloads the OCR model (about 100 MB, once).
 
-Use `coord_picker.py` to visually identify coordinates on the live camera feed:
+### 4. Check the coordinates
 
-```bash
-python coord_picker.py
-```
+The default regions are for a 1920x1080 Nintendo Switch picture and are scaled to your picture size.
+If the captured name or Pokemon look cut off:
 
-Click once for the top-left corner, click again for the bottom-right corner.  
-Coordinates are printed to the console — copy them into `config.py`.
+1. Go to a team selection screen in the game and press `F8`. This saves `calibration_frame.png`.
+2. Run `.venv\Scripts\python coord_picker.py`. Blue boxes show the current regions.
+3. Click top-left, then bottom-right, for the name (region 1) and the six Pokemon slots (regions 2-7). Press `Q`.
+4. Paste the printed block into `config.py` and restart the tool.
 
 ## Usage
 
-Double-click `start_overlay.bat` to launch.
-
-> **Note:** On first run, EasyOCR will automatically download the OCR model (~100 MB). This only happens once. Startup may take a few seconds while the model loads.
+Double-click `start_overlay.bat`.
 
 | Hotkey | Action |
 |---|---|
-| `F9` | Capture current frame and send to OBS |
-| `F10` | Clear the OBS overlay |
-| `Esc` | Exit the tool |
+| `F9` | Capture the current picture and send it to OBS |
+| `F10` | Clear the overlay |
+| `F8` | Save the current picture to `calibration_frame.png` |
+| `Ctrl+Alt+Q` | Quit (closing the window also works) |
+
+Hotkeys are global, so they work while the game or OBS has focus. Change them in `config.py`.
 
 ## Example
 
 ### Step 1 — Press `F9` on the team selection screen
 
-When the opponent's team appears on the selection screen, press `F9` to capture their name and Pokemon lineup.
-
 ![Team selection screen](images/ex_select.png)
 
 > The opponent's 6 Pokemon are listed on the right side of the screen.
 
-### Step 2 — Opponent info is displayed in OBS
-
-The captured data is instantly sent to OBS and shown as an overlay on your stream.
+### Step 2 — The opponent info is shown in OBS
 
 ![OBS stream UI sample](images/ex_obs_uisample.png)
 
-> Top-right: opponent's 6 Pokemon lineup. Top-left: opponent's trainer name (hidden in this example for privacy).  
-> The layout is fully customizable in OBS — position and size each source however you like.
+> Top-right: the opponent's 6 Pokemon. Top-left: the opponent's name (hidden here for privacy).
 
-### Step 3 — Press `F10` to clear after the battle
-
-When the match ends, press `F10` to remove the overlay from OBS.
+### Step 3 — Press `F10` after the battle
 
 ## File Structure
 
 ```
 PokemonChampions-obs-overlay/
-├── overlay.py          # Main script
-├── config.py           # Coordinates and settings
-├── requirements.txt    # Python dependencies
-├── start_overlay.bat   # Windows launcher
-├── .env.example        # Template for .env
-├── find_camera.py      # Find available capture card device IDs
-├── check_camera.py     # Preview camera feed for a given device ID
-├── coord_picker.py     # Visual coordinate picker tool
-└── test_connection.py  # Test OBS WebSocket connection
+├── overlay.py            # Main script (hotkeys, capture, OCR, OBS updates)
+├── obs_link.py           # OBS WebSocket: connect, grab picture, create/update sources
+├── capture_logic.py      # Cropping, scaling and composing (no OBS code)
+├── config.py             # Source name, regions, hotkeys
+├── grab_frame.py         # Save the current OBS picture to calibration_frame.png
+├── coord_picker.py       # Pick regions on calibration_frame.png
+├── setup_obs_sources.py  # Create the two OBS sources (overlay.py does this too)
+├── test_connection.py    # Test the OBS WebSocket connection
+├── start_overlay.bat     # Windows launcher
+├── requirements.txt      # Python dependencies
+└── .env.example          # Template for .env
 ```
 
 ## Notes
 
-- Never commit `.env` to Git — it contains your OBS password
-- Coordinates must be adjusted to match your own screen setup
-- OBS must be running before launching the tool
+- Never commit `.env` to Git, it contains your OBS password
+- OBS must be running before you start the tool
+- The name OCR works best when the picture is at least 720p. `OCR_UPSCALE` in `config.py` enlarges the name crop first.
